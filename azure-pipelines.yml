@@ -1,0 +1,401 @@
+# yaml-language-server: $schema=./azure-pipelines.schema.json
+###############################################################################
+# Azure DevOps Pipeline - Single Terraform workflow for three landing zones
+#
+# Parameters:
+#   environment: platform | connectivity | sandbox
+#   userId: plat | conn | 01 | 02 | 03
+#
+# Stages:
+#   1. BootstrapBackend
+#   2. TerraformInit
+#   3. TerraformPlan
+#   4. TerraformApply
+###############################################################################
+
+trigger:
+  branches:
+    include:
+      - main
+      - feature/user*
+
+parameters:
+  - name: environment
+    displayName: 'Landing zone environment'
+    type: string
+    default: 'platform'
+    values:
+      - 'platform'
+      - 'connectivity'
+      - 'sandbox'
+
+  - name: userId
+    displayName: 'User ID / state suffix'
+    type: string
+    default: 'plat'
+    values:
+      - 'plat'
+      - 'conn'
+      - '01'
+      - '02'
+      - '03'
+
+variables:
+  - name: serviceConnection
+    value: 'tf-service-connection'
+
+  - name: backendResourceGroup
+    value: rg-tfstate
+  - name: backendStorageAccount
+    value: sttfstatetrn001
+  - name: backendContainer
+    value: tfstate
+  - name: backendLocation
+    value: eastus
+
+  - name: terraformVersion
+    value: 1.9.5
+
+  - name: workingDir
+    value: "${{ parameters.environment == 'platform' ? 'training_iac/caf_lz/platform_lz' : parameters.environment == 'connectivity' ? 'training_iac/caf_lz/connectivity_lz' : 'training_iac/caf_lz/sandbox_lz' }}"
+
+  - name: tfvarsRelPath
+    value: "${{ format('../../landingzone_tfvars/{0}.tfvars', parameters.environment) }}"
+
+  - name: stateKey
+    value: ${{ format('{0}-{1}.tfstate', parameters.environment, parameters.userId) }}
+
+  - name: planArtifactName
+    value: ${{ format('tfplan-{0}-{1}', parameters.environment, parameters.userId) }}
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: BootstrapBackend
+    displayName: '1. BootstrapBackend'
+    jobs:
+      - job: BootstrapBackend
+        displayName: 'Create backend resources if missing'
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'Ensure backend RG / Storage Account / Container'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                RG="$(backendResourceGroup)"
+                SA="$(backendStorageAccount)"
+                CT="$(backendContainer)"
+                LOC="$(backendLocation)"
+
+                az provider register --namespace Microsoft.Storage --wait
+
+                if ! az group show -n "$RG" >/dev/null 2>&1; then
+                  echo "Creating resource group $RG in $LOC"
+                  az group create -n "$RG" -l "$LOC" -o none
+                else
+                  echo "Resource group $RG already exists"
+                fi
+
+                if ! az storage account show -n "$SA" -g "$RG" >/dev/null 2>&1; then
+                  echo "Creating storage account $SA"
+                  az storage account create \
+                    -n "$SA" -g "$RG" -l "$LOC" \
+                    --sku Standard_LRS \
+                    --kind StorageV2 \
+                    --min-tls-version TLS1_2 \
+                    --allow-blob-public-access false \
+                    -o none
+                else
+                  echo "Storage account $SA already exists"
+                fi
+
+                KEY=$(az storage account keys list -n "$SA" -g "$RG" --query '[0].value' -o tsv)
+
+                if ! az storage container show \
+                      --name "$CT" --account-name "$SA" --account-key "$KEY" >/dev/null 2>&1; then
+                  echo "Creating container $CT"
+                  az storage container create \
+                    --name "$CT" --account-name "$SA" --account-key "$KEY" \
+                    -o none
+                else
+                  echo "Container $CT already exists"
+                fi
+
+                echo "BootstrapBackend complete."
+
+  - stage: TerraformInit
+    displayName: '2. TerraformInit'
+    dependsOn: BootstrapBackend
+    jobs:
+      - job: InitPlatform
+        displayName: 'Terraform init (platform)'
+        condition: eq('${{ parameters.environment }}', 'platform')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform init - platform'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/platform_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform init -input=false -reconfigure \
+                  -backend-config="resource_group_name=$(backendResourceGroup)" \
+                  -backend-config="storage_account_name=$(backendStorageAccount)" \
+                  -backend-config="container_name=$(backendContainer)" \
+                  -backend-config="key=platform-plat.tfstate"
+
+      - job: InitConnectivity
+        displayName: 'Terraform init (connectivity)'
+        condition: eq('${{ parameters.environment }}', 'connectivity')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform init - connectivity'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/connectivity_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform init -input=false -reconfigure \
+                  -backend-config="resource_group_name=$(backendResourceGroup)" \
+                  -backend-config="storage_account_name=$(backendStorageAccount)" \
+                  -backend-config="container_name=$(backendContainer)" \
+                  -backend-config="key=connectivity-conn.tfstate"
+
+      - job: InitSandbox
+        displayName: 'Terraform init (sandbox)'
+        condition: eq('${{ parameters.environment }}', 'sandbox')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform init - sandbox'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/sandbox_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform init -input=false -reconfigure \
+                  -backend-config="resource_group_name=$(backendResourceGroup)" \
+                  -backend-config="storage_account_name=$(backendStorageAccount)" \
+                  -backend-config="container_name=$(backendContainer)" \
+                  -backend-config="key=sandbox-${{ parameters.userId }}.tfstate"
+
+  - stage: TerraformPlan
+    displayName: '3. TerraformPlan'
+    dependsOn: TerraformInit
+    jobs:
+      - job: PlanPlatform
+        displayName: 'Terraform plan (platform)'
+        condition: eq('${{ parameters.environment }}', 'platform')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform validate + plan - platform'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/platform_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform validate
+                terraform plan -input=false \
+                  -var-file="../../landingzone_tfvars/platform.tfvars" \
+                  -out=tfplan
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish tfplan artifact - platform'
+            inputs:
+              targetPath: training_iac/caf_lz/platform_lz/tfplan
+              artifact: tfplan-platform
+              publishLocation: pipeline
+
+      - job: PlanConnectivity
+        displayName: 'Terraform plan (connectivity)'
+        condition: eq('${{ parameters.environment }}', 'connectivity')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform validate + plan - connectivity'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/connectivity_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform validate
+                terraform plan -input=false \
+                  -var-file="../../landingzone_tfvars/connectivity.tfvars" \
+                  -out=tfplan
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish tfplan artifact - connectivity'
+            inputs:
+              targetPath: training_iac/caf_lz/connectivity_lz/tfplan
+              artifact: tfplan-connectivity
+              publishLocation: pipeline
+
+      - job: PlanSandbox
+        displayName: 'Terraform plan (sandbox)'
+        condition: eq('${{ parameters.environment }}', 'sandbox')
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'terraform validate + plan - sandbox'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/sandbox_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform validate
+                terraform plan -input=false \
+                  -var-file="../../landingzone_tfvars/sandbox.tfvars" \
+                  -var "user_alias=${{ parameters.userId }}" \
+                  -out=tfplan
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish tfplan artifact - sandbox'
+            inputs:
+              targetPath: training_iac/caf_lz/sandbox_lz/tfplan
+              artifact: tfplan-sandbox-${{ parameters.userId }}
+              publishLocation: pipeline
+
+  - stage: TerraformApply
+    displayName: '4. TerraformApply'
+    dependsOn: TerraformPlan
+    jobs:
+      - job: ApplyPlatform
+        displayName: 'Terraform apply (platform)'
+        condition: eq('${{ parameters.environment }}', 'platform')
+        steps:
+          - checkout: self
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download tfplan artifact - platform'
+            inputs:
+              artifact: tfplan-platform
+              path: training_iac/caf_lz/platform_lz
+
+          - task: AzureCLI@2
+            displayName: 'terraform apply - platform'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/platform_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform apply -input=false -auto-approve tfplan
+
+      - job: ApplyConnectivity
+        displayName: 'Terraform apply (connectivity)'
+        condition: eq('${{ parameters.environment }}', 'connectivity')
+        steps:
+          - checkout: self
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download tfplan artifact - connectivity'
+            inputs:
+              artifact: tfplan-connectivity
+              path: training_iac/caf_lz/connectivity_lz
+
+          - task: AzureCLI@2
+            displayName: 'terraform apply - connectivity'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/connectivity_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform apply -input=false -auto-approve tfplan
+
+      - job: ApplySandbox
+        displayName: 'Terraform apply (sandbox)'
+        condition: eq('${{ parameters.environment }}', 'sandbox')
+        steps:
+          - checkout: self
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download tfplan artifact - sandbox'
+            inputs:
+              artifact: tfplan-sandbox-${{ parameters.userId }}
+              path: training_iac/caf_lz/sandbox_lz
+
+          - task: AzureCLI@2
+            displayName: 'terraform apply - sandbox'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: training_iac/caf_lz/sandbox_lz
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform apply -input=false -auto-approve tfplan
