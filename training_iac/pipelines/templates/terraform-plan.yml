@@ -1,0 +1,79 @@
+###############################################################################
+# Step template - terraform init -> validate -> plan -> publish tfplan artifact.
+#
+# extraVars is a list of "key=value" strings injected as additional `-var`
+# flags. Used by the sandbox stage to pass user_alias from the branch name.
+###############################################################################
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: terraformVersion
+    type: string
+    default: 1.9.5
+  - name: workingDir
+    type: string
+  - name: backendResourceGroup
+    type: string
+  - name: backendStorageAccount
+    type: string
+  - name: backendContainer
+    type: string
+  - name: stateKey
+    type: string
+  - name: tfvarsRelPath
+    type: string
+  - name: planArtifactName
+    type: string
+  - name: extraVars
+    type: object
+    default: []
+
+steps:
+  - template: terraform-init.yml
+    parameters:
+      serviceConnection: ${{ parameters.serviceConnection }}
+      terraformVersion: ${{ parameters.terraformVersion }}
+      workingDir: ${{ parameters.workingDir }}
+      backendResourceGroup: ${{ parameters.backendResourceGroup }}
+      backendStorageAccount: ${{ parameters.backendStorageAccount }}
+      backendContainer: ${{ parameters.backendContainer }}
+      stateKey: ${{ parameters.stateKey }}
+
+  - task: AzureCLI@2
+    displayName: 'terraform validate + plan'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: ${{ parameters.workingDir }}
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
+        export ARM_CLIENT_ID="$servicePrincipalId"
+        export ARM_CLIENT_SECRET="$servicePrincipalKey"
+        export ARM_TENANT_ID="$tenantId"
+        export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+        if [ ! -f "${{ parameters.tfvarsRelPath }}" ]; then
+          echo "##vso[task.logissue type=error]tfvars file not found: ${{ parameters.tfvarsRelPath }}"
+          exit 1
+        fi
+
+        EXTRA_ARGS=( )
+        ${{ each v in parameters.extraVars }}
+        EXTRA_ARGS+=( -var "${{ v }}" )
+        ${{ end }}
+
+        terraform validate
+        terraform plan -input=false \
+          -var-file="${{ parameters.tfvarsRelPath }}" \
+          "${EXTRA_ARGS[@]}" \
+          -out=tfplan
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish tfplan artifact (${{ parameters.planArtifactName }})'
+    inputs:
+      targetPath: ${{ parameters.workingDir }}/tfplan
+      artifact: ${{ parameters.planArtifactName }}
+      publishLocation: pipeline

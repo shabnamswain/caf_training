@@ -1,0 +1,23 @@
+# Local Terraform working directories and lock metadata
+.terraform/
+.terraform.lock.hcl
+
+# Terraform state and backups - state is remote (azurerm), never commit local copies
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Plan artifacts produced by the pipeline (or local runs)
+*.tfplan
+tfplan
+
+# Sensitive overrides
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Crash logs
+crash.log
+crash.*.log

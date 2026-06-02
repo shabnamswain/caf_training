@@ -1,0 +1,80 @@
+###############################################################################
+# Bootstrap stage template - idempotently provisions the remote-state backend.
+#
+# Ensures the following exist in the target subscription:
+#   - Resource group         : ${{ parameters.backendResourceGroup }}
+#   - Storage account        : ${{ parameters.backendStorageAccount }} (LRS, TLS 1.2)
+#   - Blob container         : ${{ parameters.backendContainer }}
+#
+# Safe to run on every pipeline execution; uses `az ... show` + create-if-missing.
+###############################################################################
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: backendResourceGroup
+    type: string
+  - name: backendStorageAccount
+    type: string
+  - name: backendContainer
+    type: string
+  - name: backendLocation
+    type: string
+
+stages:
+  - stage: Bootstrap
+    displayName: '1. Bootstrap (remote state)'
+    jobs:
+      - job: Bootstrap
+        displayName: 'Ensure rg / storage account / container'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'az: create-if-missing RG, SA, container'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                RG="${{ parameters.backendResourceGroup }}"
+                SA="${{ parameters.backendStorageAccount }}"
+                CT="${{ parameters.backendContainer }}"
+                LOC="${{ parameters.backendLocation }}"
+
+                az provider register --namespace Microsoft.Storage --wait
+
+                if ! az group show -n "$RG" >/dev/null 2>&1; then
+                  echo "Creating resource group $RG in $LOC"
+                  az group create -n "$RG" -l "$LOC" -o none
+                else
+                  echo "Resource group $RG already exists"
+                fi
+
+                if ! az storage account show -n "$SA" -g "$RG" >/dev/null 2>&1; then
+                  echo "Creating storage account $SA"
+                  az storage account create \
+                    -n "$SA" -g "$RG" -l "$LOC" \
+                    --sku Standard_LRS \
+                    --kind StorageV2 \
+                    --min-tls-version TLS1_2 \
+                    --allow-blob-public-access false \
+                    -o none
+                else
+                  echo "Storage account $SA already exists"
+                fi
+
+                KEY=$(az storage account keys list -n "$SA" -g "$RG" --query '[0].value' -o tsv)
+
+                if ! az storage container show \
+                      --name "$CT" --account-name "$SA" --account-key "$KEY" \
+                      >/dev/null 2>&1; then
+                  echo "Creating container $CT"
+                  az storage container create \
+                    --name "$CT" --account-name "$SA" --account-key "$KEY" \
+                    -o none
+                else
+                  echo "Container $CT already exists"
+                fi
+
+                echo "Bootstrap complete."
