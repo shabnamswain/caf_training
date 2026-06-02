@@ -1,0 +1,644 @@
+# AZURE CAF TRAINING PLATFORM – END TO END DESIGN DOCUMENT
+BKh8Q~DEgFeUd-VJ2I4Mobe1HyE3EJtYRpPYhc8G
+## Purpose
+
+This document describes the final architecture, Terraform structure, Azure DevOps pipeline design, backend state management, user onboarding process, and execution flow for conducting Azure CAF (Cloud Adoption Framework) training using a single Azure subscription.
+
+## Goal
+
+Provide a reusable CAF learning environment where multiple users can independently deploy infrastructure using Terraform and Azure DevOps while sharing the same codebase.
+
+## Environment Assumptions
+
+* Single Azure Subscription
+* Azure DevOps for source control and pipelines
+* Terraform for Infrastructure as Code
+* Visual Studio Code for development
+* Multiple training users (User01, User02, User03, etc.)
+* Shared code repository
+* Shared Terraform modules
+* No duplicated Terraform code per user
+
+========================================================
+ARCHITECTURE OVERVIEW
+=====================
+
+Azure Subscription
+
+Subscription
+│
+├── rg-tfstate
+│   └── Storage Account
+│       └── tfstate Container
+│
+├── rg-platform
+│   ├── Log Analytics
+│   ├── Key Vault
+│   └── Monitoring Resources
+│
+├── rg-connectivity
+│   ├── Virtual Network
+│   ├── Route Tables
+│   ├── Public IPs
+│   └── Networking Components
+│
+├── rg-user01-sandbox
+├── rg-user02-sandbox
+├── rg-user03-sandbox
+├── rg-user04-sandbox
+└── etc.
+
+========================================================
+TERRAFORM REPOSITORY STRUCTURE
+==============================
+
+training_iac/
+
+caf_lz/
+│
+├── platform_lz/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── README.md
+│
+├── connectivity_lz/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── README.md
+│
+├── sandbox_lz/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── README.md
+│
+├── landingzone_tfvars/
+│   ├── platform.tfvars
+│   ├── connectivity.tfvars
+│   └── sandbox.tfvars
+│
+└── modules/
+├── resource_group/
+├── virtual_network/
+├── storage_account/
+├── key_vault/
+├── log_analytics_workspace/
+├── public_ip/
+├── route_table/
+├── bastion_host/
+├── diagnostic_setting/
+└── recovery_services_vault/
+
+========================================================
+WHY ONLY THREE TFVARS FILES?
+============================
+
+Platform resources are different.
+
+Connectivity resources are different.
+
+Sandbox resources are different.
+
+Therefore:
+
+platform.tfvars
+connectivity.tfvars
+sandbox.tfvars
+
+are sufficient.
+
+No need for:
+
+sandbox-user01.tfvars
+sandbox-user02.tfvars
+sandbox-user03.tfvars
+
+because users deploy identical infrastructure.
+
+User-specific naming is generated dynamically through pipeline parameters.
+
+========================================================
+AZURE DEVOPS BRANCH STRATEGY
+============================
+
+main
+
+platform
+
+connectivity
+
+user01
+
+user02
+
+user03
+
+user04
+
+etc.
+
+Each user works only in their own branch.
+
+Example:
+
+User01 -> user01 branch
+
+User02 -> user02 branch
+
+User03 -> user03 branch
+
+This prevents users from affecting each other's work.
+
+========================================================
+AZURE DEVOPS PIPELINE DESIGN
+============================
+
+Only one pipeline is required.
+
+deploy.yml
+
+Pipeline Parameters
+
+environment
+
+Allowed values:
+
+platform
+
+connectivity
+
+sandbox
+
+userId
+
+Examples:
+
+plat
+
+conn
+
+01
+
+02
+
+03
+
+========================================================
+PIPELINE STAGES
+===============
+
+Stage 1
+
+BootstrapBackend
+
+Purpose:
+
+Create Terraform backend automatically.
+
+Actions:
+
+1. Check Resource Group
+
+   rg-tfstate
+
+2. Check Storage Account
+
+   stcafstatexxxx
+
+3. Check Container
+
+   tfstate
+
+If missing:
+
+Create automatically.
+
+If existing:
+
+Skip.
+
+This stage is idempotent.
+
+========================================================
+Stage 2
+
+Terraform Init
+
+Purpose:
+
+Initialize Terraform backend.
+
+Backend key generated dynamically.
+
+Examples:
+
+platform-plat.tfstate
+
+connectivity-conn.tfstate
+
+sandbox-01.tfstate
+
+sandbox-02.tfstate
+
+sandbox-03.tfstate
+
+========================================================
+Stage 3
+
+Terraform Plan
+
+Purpose:
+
+Validate deployment.
+
+Generate execution plan.
+
+Review changes before deployment.
+
+========================================================
+Stage 4
+
+Terraform Apply
+
+Purpose:
+
+Deploy infrastructure.
+
+Creates resources based on:
+
+Environment
++
+UserId
+
+========================================================
+DYNAMIC RESOURCE NAMING
+=======================
+
+Platform
+
+environment = platform
+
+Creates:
+
+rg-platform
+
+kv-platform
+
+law-platform
+
+---
+
+Connectivity
+
+environment = connectivity
+
+Creates:
+
+rg-connectivity
+
+vnet-connectivity
+
+pip-connectivity
+
+---
+
+Sandbox User01
+
+environment = sandbox
+
+userId = 01
+
+Creates:
+
+rg-user01-sandbox
+
+vnet-user01
+
+stuser01
+
+---
+
+Sandbox User02
+
+environment = sandbox
+
+userId = 02
+
+Creates:
+
+rg-user02-sandbox
+
+vnet-user02
+
+stuser02
+
+========================================================
+TERRAFORM STATE DESIGN
+======================
+
+One backend.
+
+Multiple state files.
+
+Examples:
+
+platform-plat.tfstate
+
+connectivity-conn.tfstate
+
+sandbox-01.tfstate
+
+sandbox-02.tfstate
+
+sandbox-03.tfstate
+
+sandbox-04.tfstate
+
+Benefits:
+
+No state corruption.
+
+No locking conflicts.
+
+Each user has isolated Terraform state.
+
+========================================================
+HOW TRAINING WILL WORK
+======================
+
+Training Day
+
+Step 1
+
+Provide users:
+
+Azure DevOps URL
+
+Repository URL
+
+Branch Name
+
+========================================================
+Step 2
+
+User clones repository.
+
+git clone
+
+========================================================
+Step 3
+
+User switches to personal branch.
+
+Examples:
+
+git checkout user01
+
+git checkout user02
+
+========================================================
+Step 4
+
+User modifies Terraform code.
+
+Examples:
+
+Add Storage Account
+
+Add Resource Group
+
+Add VNet
+
+Add Key Vault
+
+========================================================
+Step 5
+
+User commits changes.
+
+git add .
+
+git commit -m "Added sandbox resources"
+
+git push
+
+========================================================
+Step 6
+
+User runs Azure DevOps Pipeline.
+
+Parameters:
+
+environment = sandbox
+
+userId = 01
+
+========================================================
+Step 7
+
+Pipeline executes.
+
+BootstrapBackend
+
+Terraform Init
+
+Terraform Plan
+
+Terraform Apply
+
+========================================================
+Step 8
+
+Resources deployed.
+
+Example:
+
+rg-user01-sandbox
+
+vnet-user01
+
+stuser01
+
+========================================================
+PLATFORM DEPLOYMENT DEMO
+========================
+
+Trainer runs:
+
+environment = platform
+
+userId = plat
+
+Pipeline deploys:
+
+rg-platform
+
+key vault
+
+log analytics
+
+monitoring
+
+========================================================
+CONNECTIVITY DEPLOYMENT DEMO
+============================
+
+Trainer runs:
+
+environment = connectivity
+
+userId = conn
+
+Pipeline deploys:
+
+rg-connectivity
+
+vnet
+
+public ip
+
+route tables
+
+========================================================
+SANDBOX DEPLOYMENT DEMO
+=======================
+
+User01
+
+environment = sandbox
+
+userId = 01
+
+Deploys:
+
+rg-user01-sandbox
+
+vnet-user01
+
+stuser01
+
+---
+
+User02
+
+environment = sandbox
+
+userId = 02
+
+Deploys:
+
+rg-user02-sandbox
+
+vnet-user02
+
+stuser02
+
+========================================================
+CLIENT HANDOVER PROCESS
+=======================
+
+Deliverables
+
+1. Terraform Repository
+
+2. Azure DevOps Pipeline
+
+3. Service Connection
+
+4. Storage Backend
+
+5. Documentation
+
+6. Training Material
+
+========================================================
+POST TRAINING OPERATING MODEL
+=============================
+
+Platform Team
+
+Maintains:
+
+platform_lz
+
+connectivity_lz
+
+modules
+
+---
+
+Developers
+
+Use:
+
+sandbox_lz
+
+Personal branches
+
+Azure DevOps Pipeline
+
+---
+
+Benefits
+
+Single codebase
+
+Reusable modules
+
+Minimal maintenance
+
+Separate Terraform state
+
+No duplicate Terraform folders
+
+No duplicate sandbox code
+
+Supports unlimited users
+
+Easy to scale
+
+CAF aligned learning environment
+
+========================================================
+FINAL DESIGN SUMMARY
+====================
+
+Azure Subscription : 1
+
+Landing Zones : 3
+
+Platform
+Connectivity
+Sandbox
+
+Terraform Repository : 1
+
+Azure DevOps Pipeline : 1
+
+Terraform Modules : Shared
+
+Backend Storage : Auto-created
+
+Backend Container : Auto-created
+
+TFVars Files : 3
+
+platform.tfvars
+connectivity.tfvars
+sandbox.tfvars
+
+User-specific TFVars : 0
+
+User-specific Folders : 0
+
+Terraform State Files : Dynamic
+
+Branches : One per user
+
+Deployment Model : Parameter Driven
+
+Training Model : Self-Service
+
+Infrastructure Style : Azure CAF Learning Environment
